@@ -15,19 +15,35 @@ import { exec } from "child_process";
 import userRoutes from "./routes/userRoutes";
 import roomRoutes from "./routes/roomRoutes";
 import { Message } from './models/Message';
+import { setupTerminalSocket } from './socket/terminalsocket';
+
 
 dotenv.config();
 
 const app = express();
 
 const corsOptions = {
-  origin: process.env.FRONTEND_URL, // Use the URL from .env file
-  credentials: true, // Allow credentials (cookies, authorization headers, etc.)
+  origin: process.env.FRONTEND_URL,
+  credentials: true,
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
 };
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' })); // Increased limit for file uploads
 app.use(express.static(path.join(__dirname, "public")));
+app.use((err: Error, req: Request, res: Response, next: express.NextFunction) => {
+  console.error('Unhandled error:', err);
+  console.error('Stack trace:', err.stack);
+  console.error('Request path:', req.path);
+  console.error('Request method:', req.method);
+  console.error('Request body:', req.body);
+  
+  res.status(500).json({
+    message: 'An unexpected error occurred',
+    error: err.message,
+  });
+});
 
 // MongoDB Connection
 const mongoUri: string | undefined = process.env.MONGO_URI;
@@ -72,6 +88,8 @@ app.use((err: Error, req: Request, res: Response, next: express.NextFunction) =>
   });
 });
 
+
+
 // Initialize the Google AI client
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
 console.log("Gemini API Key:", process.env.GOOGLE_API_KEY ? "Set" : "Not set");
@@ -84,6 +102,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e8,
   pingTimeout: 60000,
 });
+setupTerminalSocket(io);
 
 let userSocketMap: User[] = [];
 
@@ -136,7 +155,13 @@ io.on("connection", (socket) => {
     socket.emit(SocketEvent.ROOM_JOINED);
   });
 
+   
   // File system events
+  socket.on(SocketEvent.FILE_STRUCTURE_UPDATE, (data) => {
+    console.log("Received file structure update:", data);
+    // Broadcast to all connected clients
+    io.emit(SocketEvent.FILE_STRUCTURE_UPDATE, data);
+});
   socket.on(SocketEvent.DIRECTORY_CREATED, ({ parentDirId, newDirectory }) => {
     const roomId = getRoomId(socket.id);
     if (!roomId) return;
