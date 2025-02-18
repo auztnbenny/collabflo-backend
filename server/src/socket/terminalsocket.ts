@@ -165,11 +165,87 @@ dist-ssr
 *.sln
 *.sw?`
 };
+const flutterTemplates = {
+    'pubspec.yaml': `
+name: flutter_app
+description: A new Flutter project.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true`,
+    '.gitignore': `
+# Flutter/Dart specific
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+/build/
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/`
+};
 interface TerminalCommand {
     command: string;
     cwd: string;
 }
+async function readProjectDirectory(directoryPath: string): Promise<any[]> {
+    const children: any[] = [];
+    const blackList = ['.git', '.vscode', '.dart_tool', 'build', '.idea'];
 
+    try {
+        const entries = await fs.readdir(directoryPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const fullPath = path.join(directoryPath, entry.name);
+
+            if (entry.isFile()) {
+                try {
+                    const content = await fs.readFile(fullPath, 'utf-8');
+                    children.push({
+                        id: uuidv4(),
+                        name: entry.name,
+                        type: 'file',
+                        content: content,
+                    });
+                } catch (error) {
+                    console.error(`Error reading file ${fullPath}:`, error);
+                }
+            } else if (entry.isDirectory() && !blackList.includes(entry.name)) {
+                children.push({
+                    id: uuidv4(),
+                    name: entry.name,
+                    type: 'directory',
+                    children: await readProjectDirectory(fullPath),
+                    isOpen: false,
+                });
+            }
+        }
+    } catch (error) {
+        console.error(`Error reading directory ${directoryPath}:`, error);
+    }
+
+    return children;
+}
 export function setupTerminalSocket(io: Server) {
     // Add at the start of setupTerminalSocket
     function getViteProjectPath(workspacePath: string, projectName: string) {
@@ -315,7 +391,137 @@ export function setupTerminalSocket(io: Server) {
                     });
                     return;
                 }
-        
+           if (command.startsWith('flutter create')) {
+    const projectName = args[1] || 'flutter_app';
+    currentProjectPath = path.resolve(workspacePath, projectName);
+    console.log('Creating Flutter project at:', currentProjectPath);
+
+    try {
+        // Create Flutter project using flutter create command
+        const createProcess = spawn('flutter', ['create', projectName], {
+            cwd: workspacePath,
+            shell: true,
+            env: { ...Process.env, FORCE_COLOR: 'true' }
+        });
+
+        createProcess.stdout?.on('data', (data: Buffer) => {
+            socket.emit('terminal:output', { data: data.toString() });
+        });
+
+        createProcess.stderr?.on('data', (data: Buffer) => {
+            socket.emit('terminal:output', { data: data.toString() });
+        });
+
+        createProcess.on('close', async (code: number | null) => {
+            if (code === 0) {
+                try {
+                    // Read the actual project directory structure
+                    const projectStructure = await readProjectDirectory(currentProjectPath);
+                    
+                    // Emit the actual file structure to update the frontend
+                    io.emit(SocketEvent.FILE_STRUCTURE_UPDATE, {
+                        type: 'project:created',
+                        path: projectName,
+                        parentPath: virtualDirectory,
+                        rootId: uuidv4(),
+                        structure: projectStructure  // Send the actual structure
+                    });
+
+                    socket.emit('terminal:output', { 
+                        data: `\nFlutter project created and imported successfully at ${currentProjectPath}\n` 
+                    });
+                } catch (error) {
+                    console.error('Error reading project structure:', error);
+                    socket.emit('terminal:error', { 
+                        error: 'Project created but failed to import structure' 
+                    });
+                }
+            } else {
+                socket.emit('terminal:output', { 
+                    data: `\nProject creation failed with code ${code}\n` 
+                });
+            }
+            socket.emit('terminal:ready');
+        });
+    } catch (error) {
+        console.error('Error creating Flutter project:', error);
+        socket.emit('terminal:error', { error: 'Failed to create Flutter project' });
+        socket.emit('terminal:ready');
+    }
+    return;
+    }
+                if (command.startsWith('flutter run')) {
+                    const projectName = cwd.split('/').filter(Boolean).pop();
+                    const projectPath = path.join(workspacePath, projectName || '');
+
+                    try {
+                        // Verify pubspec.yaml exists and is readable
+                        const pubspecPath = path.join(projectPath, 'pubspec.yaml');
+                        await fs.access(pubspecPath);
+
+                        // Run flutter pub get first
+                        const pubGetProcess = spawn('flutter', ['pub', 'get'], {
+                            cwd: projectPath,
+                            shell: true,
+                            env: { ...Process.env, FORCE_COLOR: 'true' }
+                        });
+
+                        pubGetProcess.stdout?.on('data', (data: Buffer) => {
+                            socket.emit('terminal:output', { data: data.toString() });
+                        });
+
+                        pubGetProcess.stderr?.on('data', (data: Buffer) => {
+                            socket.emit('terminal:output', { data: data.toString() });
+                        });
+
+                        pubGetProcess.on('close', (code: number | null) => {
+                            if (code === 0) {
+                                // Now run the actual flutter run command
+                                const runProcess = spawn('flutter', ['run', ...args.slice(1)], {
+                                    cwd: projectPath,
+                                    shell: true,
+                                    env: { 
+                                        ...Process.env, 
+                                        FORCE_COLOR: 'true',
+                                        PWD: projectPath,
+                                        FLUTTER_ROOT: Process.env.FLUTTER_ROOT
+                                    }
+                                });
+
+                                runProcess.stdout?.on('data', (data: Buffer) => {
+                                    socket.emit('terminal:output', { data: data.toString() });
+                                });
+
+                                runProcess.stderr?.on('data', (data: Buffer) => {
+                                    socket.emit('terminal:output', { data: data.toString() });
+                                });
+
+                                runProcess.on('close', (code: number | null) => {
+                                    socket.emit('terminal:ready');
+                                });
+
+                                // Cleanup on disconnect
+                                socket.on('disconnect', () => {
+                                    runProcess.kill();
+                                });
+                            } else {
+                                socket.emit('terminal:output', { 
+                                    data: `\nFlutter pub get failed with code ${code}\n` 
+                                });
+                                socket.emit('terminal:ready');
+                            }
+                        });
+                        return;
+                    } catch (error) {
+                        console.error('Error running Flutter project:', error);
+                        socket.emit('terminal:output', { 
+                            data: `Error: Could not find pubspec.yaml in ${projectPath}. Please ensure you're in a Flutter project directory.\n` 
+                        });
+                        socket.emit('terminal:ready');
+                        return;
+                    }
+                }
+
                 // Handle npm init command
                 if (command.startsWith('npm init')) {
                     const projectName = command.split(' ')[2] || 'my-react-app';
