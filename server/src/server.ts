@@ -15,19 +15,40 @@ import { exec } from "child_process";
 import userRoutes from "./routes/userRoutes";
 import roomRoutes from "./routes/roomRoutes";
 import { Message } from './models/Message';
+import { setupTerminalSocket } from './socket/terminalsocket';
+import * as os from 'os';
+import * as fs from "fs/promises";
+
+
+
+
 
 dotenv.config();
 
 const app = express();
 
 const corsOptions = {
-  origin: process.env.FRONTEND_URL, // Use the URL from .env file
-  credentials: true, // Allow credentials (cookies, authorization headers, etc.)
+  origin: '*',  // WARNING: Only do this in development!
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 };
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' })); // Increased limit for file uploads
 app.use(express.static(path.join(__dirname, "public")));
+app.use((err: Error, req: Request, res: Response, next: express.NextFunction) => {
+  console.error('Unhandled error:', err);
+  console.error('Stack trace:', err.stack);
+  console.error('Request path:', req.path);
+  console.error('Request method:', req.method);
+  console.error('Request body:', req.body);
+  
+  res.status(500).json({
+    message: 'An unexpected error occurred',
+    error: err.message,
+  });
+});
 
 // MongoDB Connection
 const mongoUri: string | undefined = process.env.MONGO_URI;
@@ -40,16 +61,16 @@ mongoose.connect(mongoUri, {
   serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
 } as mongoose.ConnectOptions)
-.then(() => {
-  console.log('MongoDB connected');
-  // Log the connection details
-  console.log('Connection state:', mongoose.connection.readyState);
-  console.log('Database name:', mongoose.connection.name);
-})
-.catch((err) => {
-  console.error('MongoDB connection error:', err);
-  console.error('Full error details:', JSON.stringify(err, null, 2));
-});
+  .then(() => {
+    console.log('MongoDB connected');
+    // Log the connection details
+    console.log('Connection state:', mongoose.connection.readyState);
+    console.log('Database name:', mongoose.connection.name);
+  })
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
+    console.error('Full error details:', JSON.stringify(err, null, 2));
+  });
 
 // Your existing routes and middleware
 app.use('/api/lint', lintRoutes);
@@ -65,12 +86,14 @@ app.use((err: Error, req: Request, res: Response, next: express.NextFunction) =>
   console.error('Request path:', req.path);
   console.error('Request method:', req.method);
   console.error('Request body:', req.body);
-  
+
   res.status(500).json({
     message: 'An unexpected error occurred',
     error: err.message,
   });
 });
+
+
 
 // Initialize the Google AI client
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
@@ -84,6 +107,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e8,
   pingTimeout: 60000,
 });
+setupTerminalSocket(io);
 
 let userSocketMap: User[] = [];
 
@@ -107,7 +131,7 @@ io.on("connection", (socket) => {
 
   socket.on(SocketEvent.JOIN_REQUEST, ({ roomId, username }) => {
     console.log(`Debug: User join request for room ${roomId} with username ${username}`);
-    
+
     const isUsernameExist = getUsersInRoom(roomId).some((u) => u.username === username);
     if (isUsernameExist) {
       console.log(`Debug: Username ${username} already exists in room ${roomId}`);
@@ -136,7 +160,13 @@ io.on("connection", (socket) => {
     socket.emit(SocketEvent.ROOM_JOINED);
   });
 
+
   // File system events
+  socket.on(SocketEvent.FILE_STRUCTURE_UPDATE, (data) => {
+    console.log("Received file structure update:", data);
+    // Broadcast to all connected clients
+    io.emit(SocketEvent.FILE_STRUCTURE_UPDATE, data);
+  });
   socket.on(SocketEvent.DIRECTORY_CREATED, ({ parentDirId, newDirectory }) => {
     const roomId = getRoomId(socket.id);
     if (!roomId) return;
@@ -176,14 +206,58 @@ io.on("connection", (socket) => {
     socket.broadcast.to(roomId).emit(SocketEvent.FILE_CREATED, { parentDirId, newFile });
   });
 
-  socket.on(SocketEvent.FILE_UPDATED, ({ fileId, newContent }) => {
-    const roomId = getRoomId(socket.id);
-    if (!roomId) return;
-    socket.broadcast.to(roomId).emit(SocketEvent.FILE_UPDATED, {
+socket.on(SocketEvent.FILE_UPDATED, async ({ fileId, content, fileName }) => {
+  console.log('=== Server File Update Start ===');
+  console.log('Received update:', {
       fileId,
-      newContent,
-    });
+      fileName,
+      contentPreview: content?.substring(0, 50)
   });
+
+  try {
+      if (!fileName) {
+          throw new Error('fileName is required for file updates');
+      }
+
+      // Get workspace path
+      const workspacePath = path.join(os.homedir(), 'CodeSyncProjects', 'default');
+      
+      // Clean and normalize the file path
+      const normalizedFileName = fileName.split(/[\/\\]/).filter(Boolean).join(path.sep);
+      const filePath = path.join(workspacePath, normalizedFileName);
+
+      console.log('Path resolution:', {
+          workspacePath,
+          normalizedFileName,
+          filePath
+      });
+
+      // Create directories if they don't exist
+      const dirPath = path.dirname(filePath);
+      await fs.mkdir(dirPath, { recursive: true });
+
+      // Write the file
+      await fs.writeFile(filePath, content, 'utf-8');
+      console.log('Successfully wrote file:', filePath);
+
+      // Broadcast the update to other clients
+      const roomId = getRoomId(socket.id);
+      if (roomId) {
+          socket.broadcast.to(roomId).emit(SocketEvent.FILE_UPDATED, {
+              fileId,
+              content,
+              fileName
+          });
+      }
+
+      console.log('=== Server File Update Complete ===');
+  } catch (error) {
+      console.error('Error in file update:', error);
+      socket.emit(SocketEvent.FILE_SYSTEM_ERROR, {
+          message: `Failed to update file: ${error instanceof Error ? error.message : 'Unknown error'}`
+      });
+  }
+});
 
   socket.on(SocketEvent.FILE_RENAMED, ({ fileId, newName }) => {
     const roomId = getRoomId(socket.id);
@@ -346,27 +420,27 @@ io.on("connection", (socket) => {
   // Add new chat message handling with MongoDB support
   socket.on("chat_message", async (data) => {
     const { message, roomId, attachments } = data;
-    
+
     // Broadcast the message to the room
     io.to(roomId).emit("message_received", {
-        sender: socket.id,
-        content: message,
-        attachments,
-        timestamp: new Date()
+      sender: socket.id,
+      content: message,
+      attachments,
+      timestamp: new Date()
     });
 
     // Save to MongoDB
     try {
-        const newMessage = new Message({
-            sender: socket.id,
-            content: message,
-            attachments,
-            timestamp: new Date(),
-            roomId
-        });
-        await newMessage.save();
+      const newMessage = new Message({
+        sender: socket.id,
+        content: message,
+        attachments,
+        timestamp: new Date(),
+        roomId
+      });
+      await newMessage.save();
     } catch (error) {
-        console.error('Error saving message:', error);
+      console.error('Error saving message:', error);
     }
   });
 
@@ -382,7 +456,9 @@ io.on("connection", (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Access locally: http://localhost:${PORT}`);
+  console.log(`Access from network: http://172.20.10.0:${PORT}`);
 });

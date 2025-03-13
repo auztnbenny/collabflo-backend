@@ -2,6 +2,7 @@ import { Socket } from "socket.io"
 
 type SocketId = string
 
+
 enum SocketEvent {
     JOIN_REQUEST = "join-request",
     JOIN_ACCEPTED = "join-accepted",
@@ -32,7 +33,10 @@ enum SocketEvent {
     CHATBOT_ERROR = "CHATBOT_ERROR",
     CHATBOT_MESSAGE = "CHATBOT_MESSAGE",
     ROOM_JOINED = "ROOM_JOINED",
-    JOIN_ROOM = "JOIN_ROOM"
+    JOIN_ROOM = "JOIN_ROOM",
+    FILE_STRUCTURE_UPDATE = "file:structure:update",
+    FILE_SYSTEM_ERROR = "file:system:error",
+    WORKSPACE_CREATED = "workspace:created"
 }
 
 interface SocketContext {
